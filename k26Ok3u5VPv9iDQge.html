@@ -1,0 +1,405 @@
+<html><head><base href="https://websim.ai" />
+<title>WebSim Flappy Bird AI - Enhanced Version with Fixed Pipe Spacing</title>
+<style>
+  body, html {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    overflow: hidden;
+    background-color: #4EC0CA;
+    font-family: Arial, sans-serif;
+  }
+  #gameCanvas {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+  }
+  #info {
+    position: absolute;
+    top: 10px;
+    left: 10px;
+    font-size: 18px;
+    color: white;
+    z-index: 10;
+  }
+  #controls {
+    position: absolute;
+    bottom: 10px;
+    left: 10px;
+    z-index: 10;
+  }
+  #controls label {
+    color: white;
+    margin-right: 10px;
+  }
+  #populationSlider {
+    width: 200px;
+  }
+  #debug {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    font-size: 14px;
+    color: white;
+    background-color: rgba(0, 0, 0, 0.5);
+    padding: 10px;
+    border-radius: 5px;
+    z-index: 10;
+  }
+</style>
+</head>
+<body>
+<canvas id="gameCanvas"></canvas>
+<div id="info">
+  <div>Generation: <span id="generation">1</span></div>
+  <div>Alive: <span id="alive">0</span></div>
+  <div>Best Score: <span id="bestScore">0</span></div>
+</div>
+<div id="controls">
+  <label for="populationSlider">Population: <span id="populationSize">50</span></label>
+  <input type="range" id="populationSlider" min="1" max="100" value="50">
+</div>
+<div id="debug"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.11.0/dist/tf.min.js"></script>
+<script>
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+const generationElement = document.getElementById('generation');
+const aliveElement = document.getElementById('alive');
+const bestScoreElement = document.getElementById('bestScore');
+const populationSlider = document.getElementById('populationSlider');
+const populationSizeElement = document.getElementById('populationSize');
+const debugElement = document.getElementById('debug');
+
+canvas.width = window.innerWidth;
+canvas.height = window.innerHeight;
+
+let populationSize = 50;
+let generation = 1;
+let bestScore = 0;
+let gameSpeed = 1;
+
+class NeuralNetwork {
+  constructor(inputs, hidden, outputs) {
+    this.model = tf.sequential();
+    this.model.add(tf.layers.dense({units: hidden, inputShape: [inputs], activation: 'relu'}));
+    this.model.add(tf.layers.dense({units: outputs, activation: 'sigmoid'}));
+    this.model.compile({optimizer: 'adam', loss: 'binaryCrossentropy'});
+  }
+
+  predict(inputs) {
+    return tf.tidy(() => {
+      const xs = tf.tensor2d([inputs]);
+      const ys = this.model.predict(xs);
+      return ys.dataSync()[0];
+    });
+  }
+
+  copy() {
+    const newNN = new NeuralNetwork(5, 8, 1);
+    const weights = this.model.getWeights();
+    const weightCopies = weights.map(w => w.clone());
+    newNN.model.setWeights(weightCopies);
+    return newNN;
+  }
+}
+
+class Bird {
+  constructor(brain) {
+    this.x = canvas.width / 4;
+    this.y = canvas.height / 2;
+    this.radius = 15;
+    this.velocity = 0;
+    this.gravity = 0.6;
+    this.lift = -10;
+    this.score = 0;
+    this.fitness = 0;
+    this.brain = brain || new NeuralNetwork(5, 8, 1);
+    this.genes = {
+      liftStrength: Math.random() * 5 + 8,
+      gravity: Math.random() * 0.3 + 0.4
+    };
+    this.weights = {
+      height: Math.random() * 2 - 1,
+      velocity: Math.random() * 2 - 1,
+      topPipe: Math.random() * 2 - 1,
+      bottomPipe: Math.random() * 2 - 1,
+      distance: Math.random() * 2 - 1
+    };
+    this.alive = true;
+  }
+
+  draw() {
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+    ctx.fillStyle = this.alive ? '#FFD700' : '#FF6347';
+    ctx.fill();
+    ctx.closePath();
+  }
+
+  update() {
+    if (!this.alive) return;
+    
+    this.score++;
+    this.velocity += this.genes.gravity * gameSpeed;
+    this.y += this.velocity * gameSpeed;
+  }
+
+  think(pipes) {
+    if (!this.alive) return;
+    
+    let closestPipe = null;
+    let closestDistance = Infinity;
+
+    for (let pipe of pipes) {
+      let distance = pipe.x + pipe.width - this.x;
+      if (distance > 0 && distance < closestDistance) {
+        closestPipe = pipe;
+        closestDistance = distance;
+      }
+    }
+
+    if (closestPipe) {
+      const inputs = [
+        this.y / canvas.height * this.weights.height,
+        this.velocity / 10 * this.weights.velocity,
+        closestPipe.top / canvas.height * this.weights.topPipe,
+        closestPipe.bottom / canvas.height * this.weights.bottomPipe,
+        closestPipe.x / canvas.width * this.weights.distance
+      ];
+
+      const output = this.brain.predict(inputs);
+      if (output > 0.5) this.jump();
+    }
+  }
+
+  jump() {
+    if (!this.alive) return;
+    this.velocity = -this.genes.liftStrength * gameSpeed;
+  }
+
+  reset() {
+    this.y = canvas.height / 2;
+    this.velocity = 0;
+    this.score = 0;
+    this.alive = true;
+  }
+}
+
+class Pipe {
+  constructor(x) {
+    this.spacing = 175;
+    this.minTopPosition = 50;
+    this.maxTopPosition = canvas.height - this.spacing - 50;
+    this.top = this.getRandomTopPosition();
+    this.bottom = this.top + this.spacing;
+    this.x = x;
+    this.width = 60;
+    this.speed = 2;
+  }
+
+  getRandomTopPosition() {
+    return Math.random() * (this.maxTopPosition - this.minTopPosition) + this.minTopPosition;
+  }
+
+  draw() {
+    ctx.fillStyle = '#2ecc71';
+    ctx.fillRect(this.x, 0, this.width, this.top);
+    ctx.fillRect(this.x, this.bottom, this.width, canvas.height);
+  }
+
+  update() {
+    this.x -= this.speed * gameSpeed;
+  }
+
+  offscreen() {
+    return this.x < -this.width;
+  }
+}
+
+let birds = [];
+let pipes = [];
+let frameCount = 0;
+const pipeSpawnInterval = 100;
+const initialPipeDistance = canvas.width;
+
+function setup() {
+  birds = [];
+  for (let i = 0; i < populationSize; i++) {
+    birds.push(new Bird());
+  }
+  resetPipes();
+}
+
+function resetPipes() {
+  pipes = [];
+  pipes.push(new Pipe(canvas.width));
+  frameCount = 0;
+}
+
+function draw() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  frameCount++;
+
+  if (frameCount % pipeSpawnInterval === 0) {
+    pipes.push(new Pipe(canvas.width));
+  }
+
+  for (let i = pipes.length - 1; i >= 0; i--) {
+    pipes[i].update();
+    pipes[i].draw();
+
+    if (pipes[i].offscreen()) {
+      pipes.splice(i, 1);
+    }
+  }
+
+  let allDead = true;
+  for (let bird of birds) {
+    bird.think(pipes);
+    bird.update();
+    bird.draw();
+
+    if (bird.alive) {
+      allDead = false;
+      if (bird.y + bird.radius > canvas.height || bird.y - bird.radius < 0) {
+        bird.alive = false;
+      }
+
+      for (let pipe of pipes) {
+        if ((bird.x + bird.radius > pipe.x && bird.x - bird.radius < pipe.x + pipe.width) &&
+            (bird.y - bird.radius < pipe.top || bird.y + bird.radius > pipe.bottom)) {
+          bird.alive = false;
+        }
+      }
+    }
+  }
+
+  if (allDead) {
+    nextGeneration();
+    resetPipes();
+  }
+
+  bestScore = Math.max(bestScore, ...birds.map(b => b.score));
+  aliveElement.textContent = birds.filter(b => b.alive).length;
+  bestScoreElement.textContent = bestScore;
+
+  debugElement.innerHTML = `
+    Birds: ${birds.length}<br>
+    Pipes: ${pipes.length}<br>
+    Frame: ${frameCount}<br>
+    Canvas size: ${canvas.width}x${canvas.height}<br>
+    Game Speed: ${gameSpeed.toFixed(1)}x
+  `;
+
+  requestAnimationFrame(draw);
+}
+
+function nextGeneration() {
+  generation++;
+  generationElement.textContent = generation;
+
+  calculateFitness();
+  
+  const newBirds = [];
+  for (let i = 0; i < populationSize; i++) {
+    newBirds.push(pickOne());
+  }
+  birds = newBirds;
+}
+
+function calculateFitness() {
+  let sum = 0;
+  for (let bird of birds) {
+    sum += bird.score;
+  }
+  for (let bird of birds) {
+    bird.fitness = bird.score / sum;
+  }
+}
+
+function pickOne() {
+  let index = 0;
+  let r = Math.random();
+  while (r > 0) {
+    r -= birds[index].fitness;
+    index++;
+  }
+  index--;
+  let bird = birds[index];
+  let child = new Bird(bird.brain.copy());
+  child.genes = {...bird.genes};
+  child.weights = {...bird.weights};
+  mutate(child);
+  return child;
+}
+
+function mutate(bird) {
+  const mutationRate = 0.1;
+  
+  if (Math.random() < mutationRate) {
+    bird.genes.liftStrength += randomGaussian() * 0.5;
+  }
+  if (Math.random() < mutationRate) {
+    bird.genes.gravity += randomGaussian() * 0.05;
+  }
+  
+  for (let key in bird.weights) {
+    if (Math.random() < mutationRate) {
+      bird.weights[key] += randomGaussian() * 0.5;
+    }
+  }
+  
+  tf.tidy(() => {
+    const weights = bird.brain.model.getWeights();
+    const mutatedWeights = weights.map(tensor => {
+      let values = tensor.dataSync().slice();
+      for (let i = 0; i < values.length; i++) {
+        if (Math.random() < mutationRate) {
+          values[i] += randomGaussian();
+        }
+      }
+      return tf.tensor(values, tensor.shape);
+    });
+    bird.brain.model.setWeights(mutatedWeights);
+  });
+}
+
+function randomGaussian() {
+  let u = 0, v = 0;
+  while (u === 0) u = Math.random();
+  while (v === 0) v = Math.random();
+  return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
+}
+
+populationSlider.addEventListener('input', (e) => {
+  populationSize = parseInt(e.target.value);
+  populationSizeElement.textContent = populationSize;
+  setup();
+  generation = 1;
+  bestScore = 0;
+  generationElement.textContent = generation;
+  bestScoreElement.textContent = bestScore;
+});
+
+window.addEventListener('resize', () => {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+});
+
+window.addEventListener('keydown', (e) => {
+  if (e.code === 'ArrowUp') {
+    gameSpeed = Math.min(gameSpeed + 0.1, 5);
+  } else if (e.code === 'ArrowDown') {
+    gameSpeed = Math.max(gameSpeed - 0.1, 0.1);
+  }
+});
+
+setup();
+draw();
+</script>
+</body></html>
